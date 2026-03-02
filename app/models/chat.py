@@ -19,6 +19,9 @@ class ChatSession(Base):
     # System prompt / persona for this session
     system_prompt: Mapped[str | None] = mapped_column(Text, nullable=True)
 
+    # Telegram forum topic thread ID (for topic-per-chat mode)
+    topic_thread_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
     is_active: Mapped[bool] = mapped_column(default=True, nullable=False)
 
     created_at: Mapped[datetime.datetime] = mapped_column(

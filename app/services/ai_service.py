@@ -155,7 +155,11 @@ async def stream_chat_completion(
 
 
 def estimate_cost(model_id: str, tokens_input: int, tokens_output: int) -> float:
-    """Estimate cost in USD for a given model and token counts."""
+    """
+    Estimate cost in USD for a given model and token counts.
+    Uses litellm first, falls back to manual pricing table.
+    """
+    # Try litellm built-in cost calculation first
     try:
         cost = litellm.completion_cost(
             model=model_id,
@@ -164,8 +168,32 @@ def estimate_cost(model_id: str, tokens_input: int, tokens_output: int) -> float
             prompt_tokens=tokens_input,
             completion_tokens=tokens_output,
         )
-        return cost
+        if cost and cost > 0:
+            return cost
     except Exception:
-        logger.warning(f"Could not estimate cost for {model_id}")
-        return 0.0
+        pass
+
+    # Fallback: manual pricing table (per 1M tokens, USD)
+    # Prices from OpenRouter as of 2025
+    PRICING = {
+        "openrouter/openai/gpt-4o": {"input": 2.50, "output": 10.00},
+        "openrouter/openai/gpt-4o-mini": {"input": 0.15, "output": 0.60},
+        "openrouter/anthropic/claude-3.5-sonnet": {"input": 3.00, "output": 15.00},
+        "openrouter/google/gemini-2.0-flash-001": {"input": 0.10, "output": 0.40},
+        "openrouter/meta-llama/llama-3.1-70b-instruct": {"input": 0.52, "output": 0.75},
+        "openrouter/deepseek/deepseek-chat": {"input": 0.14, "output": 0.28},
+    }
+
+    pricing = PRICING.get(model_id)
+    if pricing:
+        cost_input = (tokens_input / 1_000_000) * pricing["input"]
+        cost_output = (tokens_output / 1_000_000) * pricing["output"]
+        return cost_input + cost_output
+
+    # Last resort: generic minimal pricing
+    logger.warning(f"No pricing for {model_id}, using fallback")
+    cost_input = (tokens_input / 1_000_000) * 0.50
+    cost_output = (tokens_output / 1_000_000) * 1.50
+    return max(cost_input + cost_output, 0.000005)  # minimum charge
+
 

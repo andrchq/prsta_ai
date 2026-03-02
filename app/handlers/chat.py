@@ -1,31 +1,89 @@
-"""Chat session management handlers."""
+"""Chat session management handlers with forum topic creation."""
 
+import logging
 from aiogram import Router, F
 from aiogram.filters import Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
+from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User
 from app.models.chat import ChatSession, ChatMessage
 from app.services.ai_service import AVAILABLE_MODELS
 
+logger = logging.getLogger(__name__)
 router = Router(name="chat_sessions")
 
+# Topic icon colors (allowed by Telegram API)
+TOPIC_COLORS = [0x6FB9F0, 0xFFD67E, 0xCB86DB, 0x8EEE98, 0xFF93B2, 0xFB6F5F]
 
-@router.callback_query(F.data == "new_chat")
-async def new_chat(callback: CallbackQuery, db_user: User, session: AsyncSession):
-    """Create a new chat session."""
+
+async def _create_topic_for_session(bot, chat_id: int, session_title: str, color_idx: int = 0):
+    """
+    Create a forum topic in the private chat.
+    Returns topic_thread_id or None if not supported.
+    """
+    try:
+        color = TOPIC_COLORS[color_idx % len(TOPIC_COLORS)]
+        result = await bot.create_forum_topic(
+            chat_id=chat_id,
+            name=session_title,
+            icon_color=color,
+        )
+        return result.message_thread_id
+    except Exception as e:
+        logger.warning(f"Could not create forum topic: {e}")
+        return None
+
+
+async def _create_chat_with_topic(
+    bot, chat_id: int, db_user: User, session: AsyncSession, title: str = None
+) -> ChatSession:
+    """Create a new chat session with a forum topic."""
+    # Count existing sessions for color rotation
+    from sqlalchemy import func
+    count = await session.scalar(
+        select(func.count(ChatSession.id)).where(ChatSession.user_id == db_user.id)
+    ) or 0
+
+    model_name = "gemini-2.0-flash"
+    chat_title = title or f"💬 Чат #{count + 1} • {model_name}"
+
+    # Create ChatSession first
     chat_session = ChatSession(
         user_id=db_user.id,
-        title="Новый чат",
+        title=chat_title,
     )
     session.add(chat_session)
     await session.commit()
     await session.refresh(chat_session)
 
+    # Try to create a forum topic
+    topic_id = await _create_topic_for_session(bot, chat_id, chat_title, count)
+    if topic_id:
+        chat_session.topic_thread_id = topic_id
+        await session.commit()
+
+    return chat_session
+
+
+@router.callback_query(F.data == "new_chat")
+async def new_chat(callback: CallbackQuery, db_user: User, session: AsyncSession):
+    """Create a new chat session with forum topic."""
+    chat_session = await _create_chat_with_topic(
+        bot=callback.bot,
+        chat_id=callback.message.chat.id,
+        db_user=db_user,
+        session=session,
+    )
+
     model_name = chat_session.model_id.split("/")[-1]
+    topic_info = ""
+    if chat_session.topic_thread_id:
+        topic_info = "\n📌 Создан отдельный топик для этого чата!"
+
     await callback.message.edit_text(
-        f"💬 Чат <b>#{chat_session.id}</b> создан!\n\n"
+        f"💬 Чат <b>#{chat_session.id}</b> создан!{topic_info}\n\n"
         f"🧠 Модель: <code>{model_name}</code>\n\n"
         f"Просто отправь мне сообщение, и я отвечу! ✨",
         parse_mode="HTML",
@@ -35,18 +93,21 @@ async def new_chat(callback: CallbackQuery, db_user: User, session: AsyncSession
 
 @router.message(Command("newchat"))
 async def cmd_new_chat(message: Message, db_user: User, session: AsyncSession):
-    """Create new chat via command."""
-    chat_session = ChatSession(
-        user_id=db_user.id,
-        title="Новый чат",
+    """Create new chat via command with forum topic."""
+    chat_session = await _create_chat_with_topic(
+        bot=message.bot,
+        chat_id=message.chat.id,
+        db_user=db_user,
+        session=session,
     )
-    session.add(chat_session)
-    await session.commit()
-    await session.refresh(chat_session)
 
     model_name = chat_session.model_id.split("/")[-1]
+    topic_info = ""
+    if chat_session.topic_thread_id:
+        topic_info = "\n📌 Создан отдельный топик!"
+
     await message.answer(
-        f"💬 Чат <b>#{chat_session.id}</b> создан!\n\n"
+        f"💬 Чат <b>#{chat_session.id}</b> создан!{topic_info}\n\n"
         f"🧠 Модель: <code>{model_name}</code>\n"
         f"Просто отправь сообщение! ✨",
         parse_mode="HTML",
