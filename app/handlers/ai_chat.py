@@ -22,9 +22,27 @@ router = Router(name="ai_chat")
 # ─── Streaming display config ─────────────────
 # Telegram allows ~30 edits/minute per chat. We use OR logic:
 # edit if enough TIME passed OR enough CHARS accumulated.
-EDIT_INTERVAL_SEC = 0.8   # edit at most every 0.8s
-MIN_CHARS_DELTA = 20      # or when 20+ new characters ready
-FIRST_EDIT_CHARS = 5      # show first edit after just 5 chars (fast first impression)
+EDIT_INTERVAL_SEC = 0.1   # edit every 0.1s
+MIN_CHARS_DELTA = 5       # or when 5+ new characters ready
+FIRST_EDIT_CHARS = 5      # show first edit after just 5 chars
+
+# System prompt injected into ALL conversations for proper Telegram formatting
+TELEGRAM_SYSTEM_PROMPT = (
+    "FORMATTING RULES (ALWAYS FOLLOW):\n"
+    "- Use ONLY Telegram HTML tags for formatting. NEVER use Markdown.\n"
+    "- Bold: <b>text</b>\n"
+    "- Italic: <i>text</i>\n"
+    "- Underline: <u>text</u>\n"
+    "- Strikethrough: <s>text</s>\n"
+    "- Monospace: <code>text</code>\n"
+    "- Code block: <pre>code</pre>\n"
+    "- Quote: <blockquote>text</blockquote>\n"
+    "- Link: <a href='url'>text</a>\n"
+    "- NEVER use **, __, `, ```, #, ##, - for formatting\n"
+    "- Use emoji to make responses lively and visual\n"
+    "- Keep answers concise and well-structured\n"
+    "- Respond in the same language as the user's message\n"
+)
 
 
 def _count_tokens(text: str) -> int:
@@ -76,8 +94,11 @@ async def handle_ai_message(message: Message, db_user: User, session: AsyncSessi
     history = list(reversed(history_result.scalars().all()))
 
     messages = []
+    # Always inject Telegram formatting instructions
+    system_parts = [TELEGRAM_SYSTEM_PROMPT]
     if chat_session.system_prompt:
-        messages.append({"role": "system", "content": chat_session.system_prompt})
+        system_parts.append(chat_session.system_prompt)
+    messages.append({"role": "system", "content": "\n\n".join(system_parts)})
     for msg in history:
         messages.append({"role": msg.role, "content": msg.content})
 
@@ -155,8 +176,13 @@ async def handle_ai_message(message: Message, db_user: User, session: AsyncSessi
         session.add(assistant_msg)
         await session.commit()
 
-        # 7. Final message with cost footer
-        footer = f"\n\n<i>💎 -{neurons_cost:.0f} | Баланс: {db_user.balance:.0f}</i>"
+        # 7. Final message with cost footer (bold + spoiler + custom emoji)
+        footer = (
+            f"\n\n<tg-spoiler><b>"
+            f"<tg-emoji emoji-id='5471952986970267163'>💎</tg-emoji> "
+            f"-{neurons_cost:.0f} | Осталось — {db_user.balance:.0f}"
+            f"</b></tg-spoiler>"
+        )
         final_text = full_response + footer
 
         if len(final_text) <= 4096:
