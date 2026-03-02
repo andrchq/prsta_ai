@@ -15,8 +15,9 @@ CYAN='\033[0;36m'
 NC='\033[0m' # No Color
 BOLD='\033[1m'
 
-# Project directory (where this script lives)
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+# Project directory (resolve symlinks to find real location)
+SCRIPT_PATH="$(readlink -f "${BASH_SOURCE[0]}")"
+PROJECT_DIR="$(cd "$(dirname "$SCRIPT_PATH")" && pwd)"
 COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
 
 # ─── Helpers ──────────────────────────────────────

@@ -14,7 +14,6 @@
 set -e
 
 GIT_REPO="https://github.com/andrchq/prsta_ai.git"
-INSTALL_DIR="/opt/prsta_ai"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -53,21 +52,29 @@ else
 fi
 
 # ─── 3. Clone or detect project directory ────────
+# If run from inside a cloned repo — use that dir.
+# If run via curl pipe — clone into current directory.
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" 2>/dev/null && pwd || echo "$PWD")"
 
-# If docker-compose.yml exists here, we're already inside the project
 if [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
+    # Already inside the project
     PROJECT_DIR="$SCRIPT_DIR"
-elif [ -d "$INSTALL_DIR" ]; then
-    echo -e "${GREEN}✅ Проект уже существует в $INSTALL_DIR${NC}"
-    PROJECT_DIR="$INSTALL_DIR"
-    cd "$PROJECT_DIR"
-    git pull
+elif [ -f "$PWD/docker-compose.yml" ]; then
+    PROJECT_DIR="$PWD"
 else
-    echo -e "${YELLOW}📥 Клонирование репозитория...${NC}"
-    git clone "$GIT_REPO" "$INSTALL_DIR"
-    PROJECT_DIR="$INSTALL_DIR"
+    # Clone into current directory
+    CLONE_DIR="$PWD/prsta_ai"
+    if [ -d "$CLONE_DIR" ]; then
+        echo -e "${GREEN}✅ Проект уже существует в $CLONE_DIR${NC}"
+        PROJECT_DIR="$CLONE_DIR"
+        cd "$PROJECT_DIR"
+        git pull
+    else
+        echo -e "${YELLOW}📥 Клонирование в $(pwd)/prsta_ai ...${NC}"
+        git clone "$GIT_REPO" "$CLONE_DIR"
+        PROJECT_DIR="$CLONE_DIR"
+    fi
 fi
 
 cd "$PROJECT_DIR"
