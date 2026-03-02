@@ -69,21 +69,18 @@ async def _create_chat_with_topic(
 
 @router.callback_query(F.data == "new_chat")
 async def new_chat(callback: CallbackQuery, db_user: User, session: AsyncSession):
-    """Create a new chat session with forum topic."""
-    chat_session = await _create_chat_with_topic(
-        bot=callback.bot,
-        chat_id=callback.message.chat.id,
-        db_user=db_user,
-        session=session,
+    """Create a new chat session (single chat, no topics)."""
+    chat_session = ChatSession(
+        user_id=db_user.id,
+        title="Новый чат",
     )
+    session.add(chat_session)
+    await session.commit()
+    await session.refresh(chat_session)
 
     model_name = chat_session.model_id.split("/")[-1]
-    topic_info = ""
-    if chat_session.topic_thread_id:
-        topic_info = "\n📌 Создан отдельный топик для этого чата!"
-
     await callback.message.edit_text(
-        f"💬 Чат <b>#{chat_session.id}</b> создан!{topic_info}\n\n"
+        f"💬 Чат <b>#{chat_session.id}</b> создан!\n\n"
         f"🧠 Модель: <code>{model_name}</code>\n\n"
         f"Просто отправь мне сообщение, и я отвечу! ✨",
         parse_mode="HTML",
@@ -93,21 +90,18 @@ async def new_chat(callback: CallbackQuery, db_user: User, session: AsyncSession
 
 @router.message(Command("newchat"))
 async def cmd_new_chat(message: Message, db_user: User, session: AsyncSession):
-    """Create new chat via command with forum topic."""
-    chat_session = await _create_chat_with_topic(
-        bot=message.bot,
-        chat_id=message.chat.id,
-        db_user=db_user,
-        session=session,
+    """Create new chat via command."""
+    chat_session = ChatSession(
+        user_id=db_user.id,
+        title="Новый чат",
     )
+    session.add(chat_session)
+    await session.commit()
+    await session.refresh(chat_session)
 
     model_name = chat_session.model_id.split("/")[-1]
-    topic_info = ""
-    if chat_session.topic_thread_id:
-        topic_info = "\n📌 Создан отдельный топик!"
-
     await message.answer(
-        f"💬 Чат <b>#{chat_session.id}</b> создан!{topic_info}\n\n"
+        f"💬 Чат <b>#{chat_session.id}</b> создан!\n\n"
         f"🧠 Модель: <code>{model_name}</code>\n"
         f"Просто отправь сообщение! ✨",
         parse_mode="HTML",
