@@ -1,0 +1,308 @@
+#!/bin/bash
+# ═══════════════════════════════════════════════════
+# PRSTA AI Bot — Server Management CLI
+# Usage: bai <command>
+# ═══════════════════════════════════════════════════
+
+set -e
+
+# Colors
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+CYAN='\033[0;36m'
+NC='\033[0m' # No Color
+BOLD='\033[1m'
+
+# Project directory (where this script lives)
+PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+COMPOSE_FILE="$PROJECT_DIR/docker-compose.yml"
+
+# ─── Helpers ──────────────────────────────────────
+
+print_header() {
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+    echo -e "${BOLD}${BLUE}  🤖 PRSTA AI Bot Manager${NC}"
+    echo -e "${CYAN}═══════════════════════════════════════${NC}"
+}
+
+print_success() {
+    echo -e "${GREEN}✅ $1${NC}"
+}
+
+print_warning() {
+    echo -e "${YELLOW}⚠️  $1${NC}"
+}
+
+print_error() {
+    echo -e "${RED}❌ $1${NC}"
+}
+
+print_info() {
+    echo -e "${BLUE}ℹ️  $1${NC}"
+}
+
+# ─── Commands ─────────────────────────────────────
+
+cmd_update() {
+    print_header
+    print_info "Обновление бота..."
+
+    cd "$PROJECT_DIR"
+
+    # Pull latest code from git
+    if [ -d ".git" ]; then
+        echo -e "${YELLOW}📥 Git pull...${NC}"
+        git pull
+    else
+        print_warning "Git не инициализирован, пропускаю git pull"
+    fi
+
+    # Rebuild and restart containers
+    echo -e "${YELLOW}🔨 Пересборка контейнеров...${NC}"
+    docker compose -f "$COMPOSE_FILE" build --no-cache bot
+
+    echo -e "${YELLOW}♻️  Перезапуск бота...${NC}"
+    docker compose -f "$COMPOSE_FILE" up -d bot
+
+    print_success "Бот обновлен и перезапущен!"
+    echo ""
+    cmd_status
+}
+
+cmd_start() {
+    print_header
+    print_info "Запуск всех сервисов..."
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" up -d
+    print_success "Все сервисы запущены!"
+    echo ""
+    cmd_status
+}
+
+cmd_stop() {
+    print_header
+    print_info "Остановка всех сервисов..."
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" down
+    print_success "Все сервисы остановлены."
+}
+
+cmd_restart() {
+    print_header
+    print_info "Перезапуск бота..."
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" restart bot
+    print_success "Бот перезапущен!"
+    echo ""
+    cmd_status
+}
+
+cmd_status() {
+    print_header
+    echo -e "${BOLD}📊 Статус сервисов:${NC}"
+    echo ""
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" ps
+    echo ""
+}
+
+cmd_logs() {
+    local lines="${1:-100}"
+    print_info "Логи бота (последние $lines строк):"
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" logs --tail="$lines" -f bot
+}
+
+cmd_logs_all() {
+    local lines="${1:-50}"
+    print_info "Логи всех сервисов (последние $lines строк):"
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" logs --tail="$lines" -f
+}
+
+cmd_db_logs() {
+    local lines="${1:-50}"
+    print_info "Логи базы данных (последние $lines строк):"
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" logs --tail="$lines" -f db
+}
+
+cmd_shell() {
+    print_info "Подключение к контейнеру бота..."
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" exec bot /bin/bash
+}
+
+cmd_db_shell() {
+    print_info "Подключение к PostgreSQL..."
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" exec db psql -U user -d prsta_ai
+}
+
+cmd_rebuild() {
+    print_header
+    print_info "Полная пересборка (без кеша)..."
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" down
+    docker compose -f "$COMPOSE_FILE" build --no-cache
+    docker compose -f "$COMPOSE_FILE" up -d
+    print_success "Полная пересборка завершена!"
+    echo ""
+    cmd_status
+}
+
+cmd_backup_db() {
+    print_header
+    local backup_dir="$PROJECT_DIR/backups"
+    local timestamp=$(date +%Y%m%d_%H%M%S)
+    local backup_file="$backup_dir/prsta_ai_${timestamp}.sql"
+
+    mkdir -p "$backup_dir"
+
+    print_info "Создание бэкапа базы данных..."
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" exec -T db pg_dump -U user prsta_ai > "$backup_file"
+
+    if [ -s "$backup_file" ]; then
+        local size=$(du -h "$backup_file" | cut -f1)
+        print_success "Бэкап создан: $backup_file ($size)"
+    else
+        print_error "Бэкап пуст или не был создан"
+        rm -f "$backup_file"
+    fi
+}
+
+cmd_restore_db() {
+    local backup_file="$1"
+    if [ -z "$backup_file" ]; then
+        print_error "Укажи файл бэкапа: bai restore-db <file.sql>"
+
+        # Show available backups
+        local backup_dir="$PROJECT_DIR/backups"
+        if [ -d "$backup_dir" ] && [ "$(ls -A $backup_dir 2>/dev/null)" ]; then
+            echo ""
+            print_info "Доступные бэкапы:"
+            ls -lh "$backup_dir"/*.sql 2>/dev/null
+        fi
+        return 1
+    fi
+
+    print_warning "Это перезапишет текущую базу данных!"
+    read -p "Продолжить? (y/N): " confirm
+    if [ "$confirm" != "y" ] && [ "$confirm" != "Y" ]; then
+        print_info "Отменено."
+        return 0
+    fi
+
+    print_info "Восстановление из $backup_file..."
+    cd "$PROJECT_DIR"
+    docker compose -f "$COMPOSE_FILE" exec -T db psql -U user -d prsta_ai < "$backup_file"
+    print_success "База данных восстановлена!"
+}
+
+cmd_cleanup() {
+    print_header
+    print_info "Очистка Docker мусора..."
+    docker system prune -f
+    docker image prune -f
+    print_success "Очистка завершена!"
+}
+
+cmd_env() {
+    print_header
+    local env_file="$PROJECT_DIR/.env"
+    if [ -f "$env_file" ]; then
+        print_info "Текущий .env (секреты скрыты):"
+        echo ""
+        while IFS= read -r line; do
+            if [[ "$line" =~ ^[[:space:]]*# ]] || [[ -z "$line" ]]; then
+                echo "$line"
+            else
+                key=$(echo "$line" | cut -d'=' -f1)
+                value=$(echo "$line" | cut -d'=' -f2-)
+                if [[ ${#value} -gt 8 ]]; then
+                    echo "$key=${value:0:4}****"
+                else
+                    echo "$key=****"
+                fi
+            fi
+        done < "$env_file"
+    else
+        print_error ".env файл не найден! Скопируй .env.example → .env"
+    fi
+}
+
+cmd_edit_env() {
+    local env_file="$PROJECT_DIR/.env"
+    if [ -f "$env_file" ]; then
+        ${EDITOR:-nano} "$env_file"
+        print_info "Перезапусти бота для применения: bai restart"
+    else
+        print_error ".env файл не найден!"
+    fi
+}
+
+# ─── Help ─────────────────────────────────────────
+
+cmd_help() {
+    print_header
+    echo ""
+    echo -e "${BOLD}Использование:${NC} bai <команда> [аргументы]"
+    echo ""
+    echo -e "${BOLD}🚀 Управление:${NC}"
+    echo -e "  ${GREEN}start${NC}          Запустить все сервисы"
+    echo -e "  ${GREEN}stop${NC}           Остановить все сервисы"
+    echo -e "  ${GREEN}restart${NC}        Перезапустить бота"
+    echo -e "  ${GREEN}update${NC}         Git pull + пересборка + перезапуск"
+    echo -e "  ${GREEN}rebuild${NC}        Полная пересборка без кеша"
+    echo -e "  ${GREEN}status${NC}         Статус контейнеров"
+    echo ""
+    echo -e "${BOLD}📋 Логи:${NC}"
+    echo -e "  ${GREEN}logs [N]${NC}       Логи бота (по умолч. 100 строк)"
+    echo -e "  ${GREEN}logs-all [N]${NC}   Логи всех сервисов"
+    echo -e "  ${GREEN}db-logs [N]${NC}    Логи PostgreSQL"
+    echo ""
+    echo -e "${BOLD}🔧 Инструменты:${NC}"
+    echo -e "  ${GREEN}shell${NC}          Bash в контейнере бота"
+    echo -e "  ${GREEN}db-shell${NC}       Консоль PostgreSQL"
+    echo -e "  ${GREEN}env${NC}            Показать .env (секреты скрыты)"
+    echo -e "  ${GREEN}edit-env${NC}       Редактировать .env"
+    echo ""
+    echo -e "${BOLD}💾 Бэкапы:${NC}"
+    echo -e "  ${GREEN}backup-db${NC}      Создать бэкап БД"
+    echo -e "  ${GREEN}restore-db${NC}     Восстановить БД из бэкапа"
+    echo ""
+    echo -e "${BOLD}🧹 Обслуживание:${NC}"
+    echo -e "  ${GREEN}cleanup${NC}        Очистить Docker мусор"
+    echo -e "  ${GREEN}help${NC}           Показать эту справку"
+    echo ""
+}
+
+# ─── Main Router ──────────────────────────────────
+
+case "${1:-help}" in
+    update)      cmd_update ;;
+    start)       cmd_start ;;
+    stop)        cmd_stop ;;
+    restart)     cmd_restart ;;
+    status)      cmd_status ;;
+    logs)        cmd_logs "$2" ;;
+    logs-all)    cmd_logs_all "$2" ;;
+    db-logs)     cmd_db_logs "$2" ;;
+    shell)       cmd_shell ;;
+    db-shell)    cmd_db_shell ;;
+    rebuild)     cmd_rebuild ;;
+    backup-db)   cmd_backup_db ;;
+    restore-db)  cmd_restore_db "$2" ;;
+    cleanup)     cmd_cleanup ;;
+    env)         cmd_env ;;
+    edit-env)    cmd_edit_env ;;
+    help|--help|-h) cmd_help ;;
+    *)
+        print_error "Неизвестная команда: $1"
+        cmd_help
+        exit 1
+        ;;
+esac

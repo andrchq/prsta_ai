@@ -1,0 +1,14 @@
+__pycache__/
+*.pyc
+*.pyo
+.env
+*.db
+*.sqlite3
+.idea/
+.vscode/
+*.egg-info/
+dist/
+build/
+venv/
+.venv/
+postgres_data/

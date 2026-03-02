@@ -1,0 +1,9 @@
+aiogram>=3.25.0
+sqlalchemy>=2.0.30
+aiosqlite>=0.20.0
+alembic>=1.13.1
+litellm>=1.81.9
+pydantic>=2.7.1
+pydantic-settings>=2.2.1
+python-dotenv>=1.0.1
+asyncpg>=0.29.0
