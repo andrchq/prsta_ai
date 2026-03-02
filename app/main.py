@@ -21,6 +21,8 @@ from app.middlewares.throttling import ThrottlingMiddleware
 from app.handlers.base import router as base_router
 from app.handlers.chat import router as chat_router
 from app.handlers.models import router as models_router
+from app.handlers.admin import router as admin_router
+from app.handlers.payments import router as payments_router
 from app.handlers.ai_chat import router as ai_chat_router
 
 logging.basicConfig(
@@ -58,6 +60,8 @@ async def main():
 
     # Register routers (order matters — ai_chat LAST, as it catches all text)
     dp.include_router(base_router)
+    dp.include_router(admin_router)
+    dp.include_router(payments_router)
     dp.include_router(chat_router)
     dp.include_router(models_router)
     dp.include_router(ai_chat_router)  # Must be last: catches F.text

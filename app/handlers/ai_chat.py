@@ -1,31 +1,48 @@
 """
-Handler for processing user messages and sending them to AI.
-This is the core handler that ties chat sessions, AI service, and billing together.
+Handler for processing user messages with STREAMING AI responses.
+Edits the Telegram message in real-time as tokens arrive.
 """
 
 import logging
+import asyncio
+import tiktoken
 from aiogram import Router, F
 from aiogram.types import Message
+from aiogram.exceptions import TelegramBadRequest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User
 from app.models.chat import ChatSession, ChatMessage
-from app.services.ai_service import chat_completion
+from app.services.ai_service import stream_chat_completion, estimate_cost
 from app.services.billing import charge_user
 
 logger = logging.getLogger(__name__)
 router = Router(name="ai_chat")
 
+# Minimum interval between message edits (Telegram rate limit)
+EDIT_INTERVAL = 1.5  # seconds
+# Minimum new characters before triggering an edit
+MIN_CHARS_DELTA = 80
 
-@router.message(F.text)
+
+def _count_tokens(text: str) -> int:
+    """Approximate token count using tiktoken (cl100k_base)."""
+    try:
+        enc = tiktoken.get_encoding("cl100k_base")
+        return len(enc.encode(text))
+    except Exception:
+        return len(text) // 4  # rough fallback
+
+
+@router.message(F.text.func(lambda text: not text.startswith("/")))
 async def handle_ai_message(message: Message, db_user: User, session: AsyncSession):
     """
-    Process incoming text messages:
+    Process incoming text messages with streaming AI response.
     1. Find or create active chat session
     2. Build message history
-    3. Call AI model
-    4. Charge user
-    5. Save response and reply
+    3. Stream AI response with live message editing
+    4. Charge user after completion
+    5. Save response
     """
     # 1. Find user's latest active chat session (or create one)
     result = await session.execute(
@@ -56,41 +73,66 @@ async def handle_ai_message(message: Message, db_user: User, session: AsyncSessi
         select(ChatMessage)
         .where(ChatMessage.session_id == chat_session.id)
         .order_by(ChatMessage.created_at.desc())
-        .limit(20)  # Last 20 messages for context
+        .limit(20)
     )
     history = list(reversed(history_result.scalars().all()))
 
     messages = []
-    # Add system prompt if the session has one
     if chat_session.system_prompt:
         messages.append({"role": "system", "content": chat_session.system_prompt})
-
     for msg in history:
         messages.append({"role": msg.role, "content": msg.content})
 
-    # 4. Show "typing" indicator
-    typing_msg = await message.answer("⏳ Думаю...")
+    # 4. Send initial "thinking" message
+    bot_msg = await message.answer("💭 ...")
 
     try:
-        # 5. Call AI
-        ai_response = await chat_completion(
+        # 5. Stream AI response
+        full_response = ""
+        last_edit_time = 0.0
+        last_edit_len = 0
+
+        async for chunk in stream_chat_completion(
             messages=messages,
             model_id=chat_session.model_id,
-        )
+        ):
+            full_response += chunk
+            now = asyncio.get_event_loop().time()
+            chars_since_edit = len(full_response) - last_edit_len
 
-        # 6. Charge user
+            # Edit message periodically to show streaming
+            if (now - last_edit_time >= EDIT_INTERVAL) and (chars_since_edit >= MIN_CHARS_DELTA):
+                try:
+                    display = full_response[:4000] + "  ▌"
+                    await bot_msg.edit_text(display)
+                    last_edit_time = now
+                    last_edit_len = len(full_response)
+                except TelegramBadRequest:
+                    pass  # message not modified or too fast
+
+        if not full_response:
+            await bot_msg.edit_text("⚠️ AI вернул пустой ответ. Попробуй ещё раз.")
+            return
+
+        # 6. Calculate cost and charge
+        tokens_in = _count_tokens(
+            " ".join(m["content"] for m in messages)
+        )
+        tokens_out = _count_tokens(full_response)
+        cost_usd = estimate_cost(chat_session.model_id, tokens_in, tokens_out)
+
         success, neurons_cost = await charge_user(
             session=session,
             user=db_user,
-            cost_usd=ai_response.cost_usd,
+            cost_usd=cost_usd,
             category="spend_text",
-            model_used=ai_response.model_used,
-            tokens_input=ai_response.tokens_input,
-            tokens_output=ai_response.tokens_output,
+            model_used=chat_session.model_id,
+            tokens_input=tokens_in,
+            tokens_output=tokens_out,
         )
 
         if not success:
-            await typing_msg.edit_text(
+            await bot_msg.edit_text(
                 f"❌ Недостаточно нейронов!\n\n"
                 f"Нужно: <b>{neurons_cost:.0f}</b> 💎\n"
                 f"Баланс: <b>{db_user.balance:.0f}</b> 💎\n\n"
@@ -99,39 +141,43 @@ async def handle_ai_message(message: Message, db_user: User, session: AsyncSessi
             )
             return
 
-        # 7. Save assistant response
+        # 7. Save assistant message
         assistant_msg = ChatMessage(
             session_id=chat_session.id,
             role="assistant",
-            content=ai_response.content,
-            tokens_used=ai_response.tokens_input + ai_response.tokens_output,
+            content=full_response,
+            tokens_used=tokens_in + tokens_out,
         )
         session.add(assistant_msg)
         await session.commit()
 
-        # 8. Reply to user
-        # Split into chunks of 4000 chars if needed (Telegram limit)
-        response_text = ai_response.content
+        # 8. Final edit with footer
         footer = f"\n\n<i>💎 -{neurons_cost:.0f} | Баланс: {db_user.balance:.0f}</i>"
 
-        if len(response_text) + len(footer) <= 4096:
-            await typing_msg.edit_text(
-                response_text + footer,
-                parse_mode="HTML",
-            )
+        if len(full_response) + len(footer) <= 4096:
+            try:
+                await bot_msg.edit_text(full_response + footer, parse_mode="HTML")
+            except TelegramBadRequest:
+                await bot_msg.edit_text(full_response + footer)
         else:
-            # Long responses: send in chunks
-            await typing_msg.delete()
-            chunks = [response_text[i:i+4000] for i in range(0, len(response_text), 4000)]
+            # Long response — split into chunks
+            await bot_msg.delete()
+            chunks = [full_response[i:i+4000] for i in range(0, len(full_response), 4000)]
             for i, chunk in enumerate(chunks):
                 if i == len(chunks) - 1:
-                    await message.answer(chunk + footer, parse_mode="HTML")
+                    try:
+                        await message.answer(chunk + footer, parse_mode="HTML")
+                    except TelegramBadRequest:
+                        await message.answer(chunk + footer)
                 else:
                     await message.answer(chunk)
 
     except Exception as e:
-        logger.error(f"AI chat error: {e}")
-        await typing_msg.edit_text(
-            "⚠️ Произошла ошибка при обработке запроса.\n"
-            "Попробуй еще раз или смени модель.",
-        )
+        logger.error(f"AI chat error: {e}", exc_info=True)
+        try:
+            await bot_msg.edit_text(
+                "⚠️ Произошла ошибка при обработке запроса.\n"
+                "Попробуй еще раз или смени модель.",
+            )
+        except TelegramBadRequest:
+            pass

@@ -118,3 +118,54 @@ async def chat_completion(
     except Exception as e:
         logger.error(f"AI completion error: {e}")
         raise
+
+
+async def stream_chat_completion(
+    messages: list[dict[str, str]],
+    model_id: str = "openrouter/google/gemini-2.0-flash-001",
+):
+    """
+    Stream messages from an LLM via LiteLLM.
+    Yields partial content chunks as they arrive.
+
+    After iteration is complete, call get_stream_cost() with the full response.
+    """
+    try:
+        response = await litellm.acompletion(
+            model=model_id,
+            messages=messages,
+            api_key=settings.openrouter_api_key,
+            stream=True,
+            extra_headers={
+                "HTTP-Referer": "https://t.me/prsta_ai_bot",
+                "X-Title": "PRSTA AI Bot",
+            },
+        )
+
+        full_content = ""
+        async for chunk in response:
+            delta = chunk.choices[0].delta
+            if delta and delta.content:
+                full_content += delta.content
+                yield delta.content
+
+    except Exception as e:
+        logger.error(f"AI stream error: {e}")
+        raise
+
+
+def estimate_cost(model_id: str, tokens_input: int, tokens_output: int) -> float:
+    """Estimate cost in USD for a given model and token counts."""
+    try:
+        cost = litellm.completion_cost(
+            model=model_id,
+            prompt="",
+            completion="",
+            prompt_tokens=tokens_input,
+            completion_tokens=tokens_output,
+        )
+        return cost
+    except Exception:
+        logger.warning(f"Could not estimate cost for {model_id}")
+        return 0.0
+
