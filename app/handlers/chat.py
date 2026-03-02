@@ -9,7 +9,6 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User
 from app.models.chat import ChatSession, ChatMessage
-from app.services.ai_service import AVAILABLE_MODELS
 
 logger = logging.getLogger(__name__)
 router = Router(name="chat_sessions")
