@@ -33,10 +33,10 @@ class User(Base):
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
 
-    # Relationships
-    transactions: Mapped[list["Transaction"]] = relationship(back_populates="user", lazy="selectin")
-    chat_sessions: Mapped[list["ChatSession"]] = relationship(back_populates="user", lazy="selectin")
-    subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="user", lazy="selectin")
+    # Relationships (lazy load to avoid pulling all data on every auth check)
+    transactions: Mapped[list["Transaction"]] = relationship(back_populates="user", lazy="select")
+    chat_sessions: Mapped[list["ChatSession"]] = relationship(back_populates="user", lazy="select")
+    subscriptions: Mapped[list["Subscription"]] = relationship(back_populates="user", lazy="select")
 
     def __repr__(self) -> str:
         return f"<User(id={self.id}, tg={self.telegram_id}, balance={self.balance})>"

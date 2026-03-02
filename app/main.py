@@ -72,6 +72,7 @@ async def main():
     dp.message.middleware(ThrottlingMiddleware(rate_limit=0.5))
     dp.message.middleware(UserAuthMiddleware())
     dp.callback_query.middleware(UserAuthMiddleware())
+    dp.pre_checkout_query.middleware(UserAuthMiddleware())
 
     # Register routers (order matters — ai_chat LAST, as it catches all text)
     dp.include_router(base_router)
@@ -85,7 +86,15 @@ async def main():
     logger.info("Starting bot polling...")
 
     try:
-        await dp.start_polling(bot)
+        await dp.start_polling(
+            bot,
+            allowed_updates=[
+                "message",
+                "callback_query",
+                "pre_checkout_query",
+                "message_reaction",
+            ],
+        )
     finally:
         await bot.session.close()
         await engine.dispose()
