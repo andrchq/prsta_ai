@@ -86,37 +86,83 @@ async def process_pre_checkout(pre_checkout: PreCheckoutQuery):
 
 @router.message(F.successful_payment)
 async def process_payment(message: Message, db_user: User, session: AsyncSession):
-    """Process successful Telegram Stars payment."""
+    """Process successful Telegram Stars payment (top-ups and subscriptions)."""
     payment = message.successful_payment
-    payload = payment.invoice_payload  # "topup_100_12000"
+    payload = payment.invoice_payload
 
     try:
         parts = payload.split("_")
-        stars = int(parts[1])
-        neurons = float(parts[2])
-    except (IndexError, ValueError):
-        logger.error(f"Invalid payment payload: {payload}")
-        await message.answer("⚠️ Ошибка обработки платежа. Обратись в поддержку.")
+        payment_type = parts[0]  # "topup" or "sub"
+
+        if payment_type == "topup":
+            # topup_100_12000
+            stars = int(parts[1])
+            neurons = float(parts[2])
+
+            new_balance = await topup_balance(
+                session=session,
+                user=db_user,
+                neurons_amount=neurons,
+                category="topup_stars",
+                description=f"Telegram Stars: {stars} stars → {neurons:.0f} neurons",
+            )
+
+            await message.answer(
+                f"🎉 <b>Оплата прошла!</b>\n\n"
+                f"⭐ Оплачено: {stars} Stars\n"
+                f"💎 Начислено: <b>{neurons:.0f}</b> нейронов\n"
+                f"💰 Новый баланс: <b>{new_balance:.0f}</b> 💎",
+                parse_mode="HTML",
+            )
+
+        elif payment_type == "sub":
+            # sub_pro_50000
+            from datetime import datetime, timedelta, timezone
+            from app.models.subscription import Subscription
+
+            plan_key = parts[1]
+            neurons = float(parts[2])
+
+            # Create subscription record
+            sub = Subscription(
+                user_id=db_user.id,
+                plan=plan_key,
+                is_active=True,
+                expires_at=datetime.now(timezone.utc) + timedelta(days=30),
+            )
+            session.add(sub)
+
+            # Update user tier
+            db_user.subscription_tier = plan_key
+
+            # Credit neurons
+            new_balance = await topup_balance(
+                session=session,
+                user=db_user,
+                neurons_amount=neurons,
+                category="subscription",
+                description=f"Subscription {plan_key}: {neurons:.0f} neurons",
+            )
+
+            plan_names = {"pro": "⭐ Pro", "premium": "👑 Premium", "ultimate": "💎 Ultimate"}
+            plan_name = plan_names.get(plan_key, plan_key)
+
+            await message.answer(
+                f"🎉 <b>Подписка {plan_name} активирована!</b>\n\n"
+                f"💎 Начислено: <b>{neurons:.0f}</b> нейронов\n"
+                f"💰 Новый баланс: <b>{new_balance:.0f}</b> 💎\n"
+                f"⏳ Действует: 30 дней",
+                parse_mode="HTML",
+            )
+        else:
+            logger.error(f"Unknown payment type: {payload}")
+            await message.answer("⚠️ Неизвестный тип платежа.")
+            return
+
+    except (IndexError, ValueError) as e:
+        logger.error(f"Invalid payment payload: {payload} — {e}")
+        await message.answer("⚠️ Ошибка обработки. Обратись в поддержку.")
         return
 
-    # Credit neurons to user
-    new_balance = await topup_balance(
-        session=session,
-        user=db_user,
-        neurons_amount=neurons,
-        category="topup_stars",
-        description=f"Telegram Stars: {stars} stars → {neurons:.0f} neurons",
-    )
+    logger.info(f"Payment: user {db_user.telegram_id}, payload={payload}")
 
-    await message.answer(
-        f"🎉 <b>Оплата прошла!</b>\n\n"
-        f"⭐ Оплачено: {stars} Stars\n"
-        f"💎 Начислено: <b>{neurons:.0f}</b> нейронов\n"
-        f"💰 Новый баланс: <b>{new_balance:.0f}</b> 💎",
-        parse_mode="HTML",
-    )
-
-    logger.info(
-        f"Payment: user {db_user.telegram_id} paid {stars} stars, "
-        f"got {neurons:.0f} neurons, balance: {new_balance:.0f}"
-    )
