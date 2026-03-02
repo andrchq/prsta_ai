@@ -2,10 +2,19 @@
 # ═══════════════════════════════════════════════════
 # PRSTA AI Bot — Initial Server Setup
 # Run ONCE on a fresh server to install everything
-# Usage: bash setup.sh
+#
+# Quick install (copy-paste on server):
+#   bash <(curl -fsSL https://raw.githubusercontent.com/andrchq/prsta_ai/main/setup.sh)
+#
+# Or manually:
+#   git clone https://github.com/andrchq/prsta_ai.git
+#   cd prsta_ai && bash setup.sh
 # ═══════════════════════════════════════════════════
 
 set -e
+
+GIT_REPO="https://github.com/andrchq/prsta_ai.git"
+INSTALL_DIR="/opt/prsta_ai"
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -43,11 +52,25 @@ else
     echo -e "${GREEN}✅ Docker Compose уже установлен: $(docker compose version)${NC}"
 fi
 
-# ─── 3. Setup project directory ──────────────────
+# ─── 3. Clone or detect project directory ────────
 
-PROJECT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+# If docker-compose.yml exists here, we're already inside the project
+if [ -f "$SCRIPT_DIR/docker-compose.yml" ]; then
+    PROJECT_DIR="$SCRIPT_DIR"
+elif [ -d "$INSTALL_DIR" ]; then
+    echo -e "${GREEN}✅ Проект уже существует в $INSTALL_DIR${NC}"
+    PROJECT_DIR="$INSTALL_DIR"
+    cd "$PROJECT_DIR"
+    git pull
+else
+    echo -e "${YELLOW}📥 Клонирование репозитория...${NC}"
+    git clone "$GIT_REPO" "$INSTALL_DIR"
+    PROJECT_DIR="$INSTALL_DIR"
+fi
+
 cd "$PROJECT_DIR"
-
 echo -e "${BLUE}📂 Рабочая директория: $PROJECT_DIR${NC}"
 
 # ─── 4. Create .env from template ────────────────
