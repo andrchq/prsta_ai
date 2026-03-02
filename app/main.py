@@ -60,10 +60,14 @@ async def _pricing_refresh_loop():
             logger.debug(f"Next pricing refresh at {next_time.strftime('%H:%M:%S')} (in {wait_seconds:.0f}s)")
             await asyncio.sleep(wait_seconds)
 
-            # Refresh pricing
+            # Refresh pricing and sync to DB
+            from app.database.session import AsyncSessionLocal
             data = await fetch_openrouter_models()
             if data:
-                logger.info(f"🔄 Pricing refreshed: {len(data)} models")
+                async with AsyncSessionLocal() as db_session:
+                    from app.services.ai_service import sync_models_to_db
+                    await sync_models_to_db(db_session)
+                logger.info(f"🔄 Pricing refreshed & synced: {len(data)} models")
             else:
                 logger.warning("Pricing refresh failed, keeping cached data")
 
@@ -100,12 +104,15 @@ async def on_startup(bot: Bot):
     logger.info("Database tables created/verified")
 
     # Fetch model pricing from OpenRouter API (initial load)
-    from app.services.ai_service import fetch_openrouter_models
+    from app.services.ai_service import fetch_openrouter_models, sync_models_to_db
     pricing_data = await fetch_openrouter_models()
     if pricing_data:
-        logger.info(f"Loaded pricing for {len(pricing_data)} models")
+        from app.database.session import AsyncSessionLocal
+        async with AsyncSessionLocal() as db_session:
+            await sync_models_to_db(db_session)
+        logger.info(f"Loaded and synced {len(pricing_data)} models from OpenRouter")
     else:
-        logger.warning("Could not load OpenRouter pricing, using hardcoded fallback")
+        logger.warning("Could not load OpenRouter pricing")
 
     # Start background pricing refresh task
     asyncio.create_task(_pricing_refresh_loop())

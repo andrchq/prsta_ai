@@ -1,4 +1,4 @@
-"""Model selection and persona handlers with DB persistence."""
+"""Model selection and persona handlers — reads enabled models from DB."""
 
 from aiogram import Router, F
 from aiogram.types import CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User
 from app.models.chat import ChatSession
-from app.services.ai_service import AVAILABLE_MODELS
+from app.models.ai_model import AIModel
 
 router = Router(name="model_selection")
 
@@ -30,18 +30,48 @@ async def _get_active_session(session: AsyncSession, user: User) -> ChatSession:
     return chat_session
 
 
+# ═══════════════════════════════════════
+# MODEL SELECTION (from DB)
+# ═══════════════════════════════════════
+
 @router.callback_query(F.data == "select_model")
 async def select_model(callback: CallbackQuery, db_user: User, session: AsyncSession):
-    """Show available AI models for selection."""
+    """Show enabled AI models from DB."""
     active = await _get_active_session(session, db_user)
 
+    # Get enabled models from DB
+    result = await session.execute(
+        select(AIModel)
+        .where(AIModel.is_enabled == True)
+        .order_by(AIModel.sort_order, AIModel.name)
+    )
+    models = result.scalars().all()
+
+    if not models:
+        await callback.message.edit_text(
+            "⚠️ Нет доступных моделей.\n\nАдминистратор ещё не включил ни одной модели.",
+        )
+        await callback.answer()
+        return
+
     buttons = []
-    for key, model in AVAILABLE_MODELS.items():
-        current = " ✓" if model["id"] == active.model_id else ""
+    for m in models:
+        current = " ✓" if m.full_id == active.model_id else ""
+        # Show modality + name + price indicator
+        price_1m_out = m.price_completion * 1_000_000
+        if price_1m_out < 1:
+            price_tag = "💚"  # free/very cheap
+        elif price_1m_out < 5:
+            price_tag = "💛"  # cheap
+        elif price_1m_out < 15:
+            price_tag = "🧡"  # moderate
+        else:
+            price_tag = "❤️"   # expensive
+
         buttons.append([
             InlineKeyboardButton(
-                text=f"{model['emoji']} {model['name']}{current}",
-                callback_data=f"set_model:{key}",
+                text=f"{m.modality_emoji} {m.name} {price_tag}{current}",
+                callback_data=f"set_model:{m.model_id[:60]}",
             )
         ])
     buttons.append([InlineKeyboardButton(text="🔙 Назад", callback_data="back_to_menu")])
@@ -49,7 +79,7 @@ async def select_model(callback: CallbackQuery, db_user: User, session: AsyncSes
     keyboard = InlineKeyboardMarkup(inline_keyboard=buttons)
     await callback.message.edit_text(
         "🧠 <b>Выбери AI модель:</b>\n\n"
-        "Модель будет использоваться для текущего чата.",
+        "💚 дешёвая  💛 средняя  🧡 дорогая  ❤️ премиум",
         reply_markup=keyboard,
         parse_mode="HTML",
     )
@@ -59,28 +89,36 @@ async def select_model(callback: CallbackQuery, db_user: User, session: AsyncSes
 @router.callback_query(F.data.startswith("set_model:"))
 async def set_model(callback: CallbackQuery, db_user: User, session: AsyncSession):
     """Save model selection to active chat session."""
-    model_key = callback.data.split(":")[1]
-    model = AVAILABLE_MODELS.get(model_key)
+    model_id = callback.data.split(":", 1)[1]
+
+    # Find model in DB
+    result = await session.execute(
+        select(AIModel).where(AIModel.model_id == model_id, AIModel.is_enabled == True)
+    )
+    model = result.scalar_one_or_none()
 
     if not model:
-        await callback.answer("❌ Модель не найдена", show_alert=True)
+        await callback.answer("❌ Модель не найдена или отключена", show_alert=True)
         return
 
     # Save to active session
     active = await _get_active_session(session, db_user)
-    active.model_id = model["id"]
+    active.model_id = model.full_id  # "openrouter/..."
     await session.commit()
 
     await callback.message.edit_text(
-        f"✅ Модель выбрана: <b>{model['emoji']} {model['name']}</b>\n\n"
-        f"📝 {model['description']}\n\n"
-        f"Теперь просто напиши мне сообщение! 💬",
+        f"✅ Модель выбрана: <b>{model.modality_emoji} {model.name}</b>\n\n"
+        f"📝 {(model.description or '')[:200]}\n"
+        f"💰 {model.price_display}\n\n"
+        f"Просто напиши мне сообщение! 💬",
         parse_mode="HTML",
     )
-    await callback.answer(f"Выбрана: {model['name']}")
+    await callback.answer(f"Выбрана: {model.name}")
 
 
-# === PERSONAS (Roles) ===
+# ═══════════════════════════════════════
+# PERSONAS (Roles)
+# ═══════════════════════════════════════
 
 PERSONAS: dict[str, dict] = {
     "programmer": {
@@ -93,15 +131,15 @@ PERSONAS: dict[str, dict] = {
     },
     "english_teacher": {
         "name": "🇬🇧 Учитель Английского",
-        "prompt": "Ты — дружелюбный учитель английского языка. Помогай с грамматикой, переводами и произношением. Давай объяснения на русском, но с примерами на английском. Исправляй ошибки мягко.",
+        "prompt": "Ты — дружелюбный учитель английского языка. Помогай с грамматикой, переводами и произношением. Давай объяснения на русском, но с примерами на английском.",
     },
     "copywriter": {
         "name": "✍️ Копирайтер",
-        "prompt": "Ты — креативный копирайтер. Помогай создавать продающие тексты, заголовки, посты для соцсетей. Предлагай несколько вариантов. Учитывай целевую аудиторию.",
+        "prompt": "Ты — креативный копирайтер. Помогай создавать продающие тексты, заголовки, посты для соцсетей. Предлагай несколько вариантов.",
     },
     "translator": {
         "name": "🌐 Переводчик",
-        "prompt": "Ты — профессиональный переводчик. Переводи тексты между русским и английским (или другими языками). Учитывай контекст и стилевые особенности.",
+        "prompt": "Ты — профессиональный переводчик. Переводи тексты между русским и английским. Учитывай контекст и стилевые особенности.",
     },
     "creative": {
         "name": "🎨 Креативный Ассистент",

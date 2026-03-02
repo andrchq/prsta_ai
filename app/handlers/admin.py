@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.user import User
 from app.models.transaction import Transaction
 from app.models.chat import ChatSession
+from app.models.ai_model import AIModel
 from app.core.config import get_admin_ids
 from app.services.billing import neurons_to_usd
 
@@ -39,6 +40,7 @@ async def cmd_admin(message: Message, db_user: User, session: AsyncSession):
             InlineKeyboardButton(text="🔧 Настройки", callback_data="admin:settings"),
         ],
         [
+            InlineKeyboardButton(text="🤖 AI Модели", callback_data="admin:models:0"),
             InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast"),
         ],
     ])
@@ -392,6 +394,7 @@ async def admin_back(callback: CallbackQuery):
             InlineKeyboardButton(text="🔧 Настройки", callback_data="admin:settings"),
         ],
         [
+            InlineKeyboardButton(text="🤖 AI Модели", callback_data="admin:models:0"),
             InlineKeyboardButton(text="📢 Рассылка", callback_data="admin:broadcast"),
         ],
     ])
@@ -403,3 +406,197 @@ async def admin_back(callback: CallbackQuery):
         parse_mode="HTML",
     )
     await callback.answer()
+
+
+# ─── AI Models Management ────────────────────────
+
+MODELS_PER_PAGE = 8
+
+
+@router.callback_query(F.data.startswith("admin:models:"))
+async def admin_models_list(callback: CallbackQuery, session: AsyncSession):
+    """Browse all AI models with pagination."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    page = int(callback.data.split(":")[2])
+
+    # Count total models in DB
+    total = await session.scalar(select(func.count(AIModel.id))) or 0
+    enabled_count = await session.scalar(
+        select(func.count(AIModel.id)).where(AIModel.is_enabled == True)
+    ) or 0
+
+    if total == 0:
+        await callback.message.edit_text(
+            "🤖 <b>AI Модели</b>\n\n"
+            "В базе нет моделей. Нажми «Синхронизировать» для загрузки из OpenRouter.",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔄 Синхронизировать", callback_data="admin:sync_models")],
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")],
+            ]),
+            parse_mode="HTML",
+        )
+        await callback.answer()
+        return
+
+    # Fetch page
+    result = await session.execute(
+        select(AIModel)
+        .order_by(AIModel.is_enabled.desc(), AIModel.sort_order, AIModel.name)
+        .offset(page * MODELS_PER_PAGE)
+        .limit(MODELS_PER_PAGE)
+    )
+    models = result.scalars().all()
+
+    total_pages = (total + MODELS_PER_PAGE - 1) // MODELS_PER_PAGE
+
+    buttons = []
+    for m in models:
+        status = "✅" if m.is_enabled else "⬜"
+        # Truncate name for button (max ~40 chars)
+        short_name = m.name[:35] if len(m.name) > 35 else m.name
+        buttons.append([
+            InlineKeyboardButton(
+                text=f"{status} {short_name}",
+                callback_data=f"admin:model:{m.id}",
+            )
+        ])
+
+    # Navigation
+    nav_buttons = []
+    if page > 0:
+        nav_buttons.append(InlineKeyboardButton(text="◀️", callback_data=f"admin:models:{page - 1}"))
+    nav_buttons.append(InlineKeyboardButton(text=f"{page + 1}/{total_pages}", callback_data="noop"))
+    if page < total_pages - 1:
+        nav_buttons.append(InlineKeyboardButton(text="▶️", callback_data=f"admin:models:{page + 1}"))
+    buttons.append(nav_buttons)
+
+    buttons.append([
+        InlineKeyboardButton(text="🔄 Синхронизировать", callback_data="admin:sync_models"),
+    ])
+    buttons.append([
+        InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back"),
+    ])
+
+    await callback.message.edit_text(
+        f"🤖 <b>AI Модели</b> ({enabled_count} вкл. / {total} всего)\n\n"
+        f"✅ = включена для пользователей\n"
+        f"⬜ = выключена",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=buttons),
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:model:"))
+async def admin_model_detail(callback: CallbackQuery, session: AsyncSession):
+    """Show model details and toggle."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    model_id = int(callback.data.split(":")[2])
+    result = await session.execute(select(AIModel).where(AIModel.id == model_id))
+    model = result.scalar_one_or_none()
+
+    if not model:
+        await callback.answer("❌ Модель не найдена", show_alert=True)
+        return
+
+    status = "✅ Включена" if model.is_enabled else "⬜ Выключена"
+    toggle_text = "⬜ Выключить" if model.is_enabled else "✅ Включить"
+
+    # Price per 1M tokens
+    p_in = model.price_prompt * 1_000_000
+    p_out = model.price_completion * 1_000_000
+
+    text = (
+        f"🤖 <b>{model.name}</b>\n\n"
+        f"📋 <b>ID:</b> <code>{model.model_id}</code>\n"
+        f"📊 <b>Статус:</b> {status}\n\n"
+        f"💰 <b>Цены (за 1M токенов):</b>\n"
+        f"├ Input: <b>${p_in:.4f}</b>\n"
+        f"└ Output: <b>${p_out:.4f}</b>\n\n"
+        f"📥 <b>Вход:</b> {model.input_modalities}\n"
+        f"📤 <b>Выход:</b> {model.output_modalities}\n"
+        f"📏 <b>Контекст:</b> {model.context_length:,} токенов\n"
+    )
+
+    if model.description:
+        desc = model.description[:200]
+        text += f"\n📝 {desc}"
+
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=toggle_text, callback_data=f"admin:toggle:{model.id}")],
+        [InlineKeyboardButton(text="🔙 К списку", callback_data="admin:models:0")],
+    ])
+
+    await callback.message.edit_text(text, reply_markup=keyboard, parse_mode="HTML")
+    await callback.answer()
+
+
+@router.callback_query(F.data.startswith("admin:toggle:"))
+async def admin_toggle_model(callback: CallbackQuery, session: AsyncSession):
+    """Toggle model enabled/disabled."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    model_id = int(callback.data.split(":")[2])
+    result = await session.execute(select(AIModel).where(AIModel.id == model_id))
+    model = result.scalar_one_or_none()
+
+    if not model:
+        await callback.answer("❌ Модель не найдена", show_alert=True)
+        return
+
+    model.is_enabled = not model.is_enabled
+    await session.commit()
+
+    status = "✅ Включена" if model.is_enabled else "⬜ Выключена"
+    await callback.answer(f"{model.name}: {status}", show_alert=True)
+
+    # Refresh detail view
+    await admin_model_detail(callback, session)
+
+
+@router.callback_query(F.data == "admin:sync_models")
+async def admin_sync_models(callback: CallbackQuery, session: AsyncSession):
+    """Force sync models from OpenRouter API."""
+    if not is_admin(callback.from_user.id):
+        await callback.answer("⛔ Нет доступа", show_alert=True)
+        return
+
+    await callback.answer("🔄 Синхронизация...", show_alert=False)
+
+    from app.services.ai_service import fetch_openrouter_models, sync_models_to_db
+    data = await fetch_openrouter_models()
+    if not data:
+        await callback.message.edit_text(
+            "❌ Не удалось получить данные от OpenRouter",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="🔙 Назад", callback_data="admin:models:0")],
+            ]),
+        )
+        return
+
+    new_count = await sync_models_to_db(session)
+
+    await callback.message.edit_text(
+        f"✅ Синхронизация завершена!\n\n"
+        f"📦 Всего моделей: <b>{len(data)}</b>\n"
+        f"🆕 Новых добавлено: <b>{new_count}</b>",
+        reply_markup=InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="🤖 К моделям", callback_data="admin:models:0")],
+            [InlineKeyboardButton(text="🔙 Назад", callback_data="admin:back")],
+        ]),
+        parse_mode="HTML",
+    )
+
+
+@router.callback_query(F.data == "noop")
+async def noop(callback: CallbackQuery):
+    await callback.answer()
+
