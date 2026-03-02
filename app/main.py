@@ -35,9 +35,23 @@ logger = logging.getLogger(__name__)
 
 async def on_startup(bot: Bot):
     """Actions to perform on bot startup."""
-    # Create all database tables
     async with engine.begin() as conn:
+        # Create new tables
         await conn.run_sync(Base.metadata.create_all)
+
+        # Auto-add missing columns to existing tables
+        migrations = [
+            "ALTER TABLE chat_sessions ADD COLUMN IF NOT EXISTS topic_thread_id INTEGER",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS referral_code VARCHAR(20) UNIQUE",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS referred_by_id BIGINT",
+            "ALTER TABLE users ADD COLUMN IF NOT EXISTS is_blocked BOOLEAN DEFAULT FALSE",
+        ]
+        for sql in migrations:
+            try:
+                await conn.execute(__import__('sqlalchemy').text(sql))
+            except Exception as e:
+                logger.debug(f"Migration skip: {e}")
+
     logger.info("Database tables created/verified")
 
     bot_info = await bot.get_me()
