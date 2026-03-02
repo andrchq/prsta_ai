@@ -1,5 +1,10 @@
 """
 Billing service — converts real USD cost to virtual currency and manages user balance.
+
+Pricing strategy:
+- Markup: x3 (user pays 3x the actual API cost)
+- Minimum charge: 10 neurons per request
+- Currency: 1 USD = 50,000 neurons
 """
 
 import logging
@@ -10,22 +15,25 @@ from app.models.transaction import Transaction
 logger = logging.getLogger(__name__)
 
 # === CONFIGURATION ===
-# How many virtual currency units (e.g. "neurons") equal 1 USD
-# Example: if RATE = 50000, then $0.01 = 500 neurons
+# How many virtual currency units ("neurons") equal 1 USD
 NEURONS_PER_USD: float = 50_000.0
 
-# Your margin percentage on top of the real cost
-MARGIN_PERCENT: float = 30.0  # 30% margin
+# Markup multiplier (user pays 3x the real cost)
+MARKUP_MULTIPLIER: float = 2.5
+
+# Minimum charge per request in neurons
+MIN_CHARGE_NEURONS: float = 10.0
 
 
 def usd_to_neurons(cost_usd: float) -> float:
-    """Convert USD cost to virtual currency with margin included."""
-    cost_with_margin = cost_usd * (1 + MARGIN_PERCENT / 100)
-    return round(cost_with_margin * NEURONS_PER_USD, 2)
+    """Convert USD cost to neurons with x3 markup, minimum 10 neurons."""
+    cost_with_markup = cost_usd * MARKUP_MULTIPLIER
+    neurons = round(cost_with_markup * NEURONS_PER_USD, 2)
+    return max(neurons, MIN_CHARGE_NEURONS)
 
 
 def neurons_to_usd(neurons: float) -> float:
-    """Convert virtual currency back to USD (without margin, for admin stats)."""
+    """Convert neurons back to USD (without markup, for admin stats)."""
     return round(neurons / NEURONS_PER_USD, 6)
 
 
@@ -69,7 +77,7 @@ async def charge_user(
 
     logger.info(
         f"Charged user {user.telegram_id}: {neurons_cost:.0f} neurons "
-        f"(${cost_usd:.6f}) for {model_used}"
+        f"(${cost_usd:.6f} x{MARKUP_MULTIPLIER:.0f}) for {model_used}"
     )
 
     return True, neurons_cost

@@ -42,6 +42,9 @@ async def _show_main_menu(message: Message, db_user: User):
             InlineKeyboardButton(text="🎭 Персоналии", callback_data="personas"),
         ],
         [
+            InlineKeyboardButton(text="🎨 Генерация картинок", callback_data="image_gen"),
+        ],
+        [
             InlineKeyboardButton(text="👤 Профиль", callback_data="profile"),
             InlineKeyboardButton(text="💰 Пополнить", callback_data="topup"),
         ],
@@ -70,6 +73,9 @@ async def cb_help(callback: CallbackQuery):
         "/profile — Твой профиль и баланс\n"
         "/newchat — Создать новый чат\n"
         "/balance — Проверить баланс\n"
+        "/image — Генерация картинки\n"
+        "/image_wide — Широкая картинка\n"
+        "/image_tall — Высокая картинка\n"
         "/admin — Админ-панель\n\n"
         "💡 Просто напиши мне сообщение, и я отвечу через выбранную AI-модель!"
     )
@@ -90,6 +96,9 @@ async def cmd_help(message: Message):
         "/profile — Твой профиль и баланс\n"
         "/newchat — Создать новый чат\n"
         "/balance — Проверить баланс\n"
+        "/image — Генерация картинки\n"
+        "/image_wide — Широкая картинка\n"
+        "/image_tall — Высокая картинка\n"
         "/admin — Админ-панель\n\n"
         "💡 Просто напиши мне сообщение, и я отвечу через выбранную AI-модель!"
     )

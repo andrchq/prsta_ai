@@ -19,9 +19,12 @@ from app.services.billing import charge_user
 logger = logging.getLogger(__name__)
 router = Router(name="ai_chat")
 
-# Minimum interval between message edits (Telegram rate limit)
-EDIT_INTERVAL = 1.5  # seconds
-MIN_CHARS_DELTA = 80  # min new chars before triggering an edit
+# ─── Streaming display config ─────────────────
+# Telegram allows ~30 edits/minute per chat. We use OR logic:
+# edit if enough TIME passed OR enough CHARS accumulated.
+EDIT_INTERVAL_SEC = 0.8   # edit at most every 0.8s
+MIN_CHARS_DELTA = 20      # or when 20+ new characters ready
+FIRST_EDIT_CHARS = 5      # show first edit after just 5 chars (fast first impression)
 
 
 def _count_tokens(text: str) -> int:
@@ -37,11 +40,7 @@ def _count_tokens(text: str) -> int:
 async def handle_ai_message(message: Message, db_user: User, session: AsyncSession):
     """
     Process incoming text messages with streaming AI response.
-    1. Find or create active chat session
-    2. Build message history
-    3. Stream AI response with live message editing
-    4. Charge user after completion
-    5. Save response
+    Shows text appearing progressively via message editing.
     """
     # 1. Find the latest active chat session (or create one)
     result = await session.execute(
@@ -89,6 +88,7 @@ async def handle_ai_message(message: Message, db_user: User, session: AsyncSessi
         full_response = ""
         last_edit_time = 0.0
         last_edit_len = 0
+        edit_count = 0
 
         async for chunk in stream_chat_completion(
             messages=messages,
@@ -98,13 +98,22 @@ async def handle_ai_message(message: Message, db_user: User, session: AsyncSessi
             now = asyncio.get_event_loop().time()
             chars_delta = len(full_response) - last_edit_len
 
-            if (now - last_edit_time >= EDIT_INTERVAL) and (chars_delta >= MIN_CHARS_DELTA):
+            # First edit: show text ASAP (after just a few chars)
+            # Subsequent edits: respect rate limit
+            should_edit = False
+            if edit_count == 0 and chars_delta >= FIRST_EDIT_CHARS:
+                should_edit = True
+            elif (now - last_edit_time >= EDIT_INTERVAL_SEC) and (chars_delta >= MIN_CHARS_DELTA):
+                should_edit = True
+
+            if should_edit:
                 try:
                     display = full_response[:4000] + "  ▌"
                     await bot_msg.edit_text(display)
+                    edit_count += 1
                 except TelegramBadRequest:
                     pass
-                last_edit_time = now
+                last_edit_time = asyncio.get_event_loop().time()
                 last_edit_len = len(full_response)
 
         if not full_response:
